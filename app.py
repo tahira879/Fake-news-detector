@@ -28,9 +28,8 @@ st.set_page_config(
 # LOAD DATASET
 # ================================
 
-fake = pd.read_csv("Fake.csv")
-true = pd.read_csv("True.csv")
-
+fake = pd.read_csv("Fake.csv.zip")
+true = pd.read_csv("True.csv.zip")
 fake["label"] = 0
 true["label"] = 1
 
