@@ -7,3 +7,4 @@ plotly
 streamlit-option-menu
 streamlit-extras
 streamlit-lottie
+nltk
