@@ -5,6 +5,7 @@ import re
 import joblib
 import os
 import time
+import zipfile
 import plotly.graph_objects as go
 import plotly.express as px
 from sklearn.model_selection import train_test_split, learning_curve
@@ -48,6 +49,7 @@ html, body, [class*="css"] {
 [data-testid="stSidebar"] {
     background: #090e1d !important;
     border-right: 1px solid #1a2540 !important;
+    width: 300px !important; /* Ensure width is fixed */
 }
 [data-testid="stSidebar"] * { color: #dce8ff !important; }
 
@@ -123,7 +125,13 @@ textarea:focus, .stTextArea textarea:focus {
 }
 .stRadio label { color: #dce8ff !important; }
 hr { border-color: #1a2540 !important; }
-#MainMenu, footer, header { visibility: hidden; }
+
+/* FIX: Only hide specific parts, not the whole header, to keep sidebar button working */
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+header { visibility: visible; background-color: #04060f; } 
+/* Hide the default "Run" button specifically if desired, but keep header visible */
+
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: #04060f; }
 ::-webkit-scrollbar-thumb { background: #1a2540; border-radius: 100px; }
@@ -198,120 +206,14 @@ def prob_bar(label, prob, color):
 
 
 def section_header(title, subtitle=""):
-    sub = f"<div style='color:#5a6e9a;font-size:14px;margin-bottom:24px;'>{subtitle}</div>" if subtitle else ""
+    sub = (
+        f"<div style='color:#5a6e9a;font-size:14px;margin-bottom:24px;'>{subtitle}</div>"
+        if subtitle else ""
+    )
     return (
         f"<div style='font-family:Syne,sans-serif;font-size:11px;letter-spacing:2px;"
         f"text-transform:uppercase;color:#5a6e9a;margin-bottom:6px;'>{title}</div>{sub}"
     )
-
-
-# ================================================
-# MODEL TRAINING  (saves ALL artifacts to disk)
-# ================================================
-@st.cache_resource(show_spinner=False)
-def load_or_train_model():
-    MODEL_PATH  = "fake_news_model.pkl"
-    VEC_PATH    = "vectorizer.pkl"
-    ACC_PATH    = "accuracy.pkl"
-    REPORT_PATH = "report.pkl"
-    CM_PATH     = "cm.pkl"
-    ROC_PATH    = "roc.pkl"
-    LC_PATH     = "lc.pkl"
-
-    # ── Load from disk if everything exists ──
-    if all(os.path.exists(p) for p in [MODEL_PATH, VEC_PATH, ACC_PATH,
-                                        REPORT_PATH, CM_PATH, ROC_PATH, LC_PATH]):
-        return (
-            joblib.load(MODEL_PATH),
-            joblib.load(VEC_PATH),
-            joblib.load(ACC_PATH),
-            joblib.load(REPORT_PATH),
-            joblib.load(CM_PATH),
-            joblib.load(ROC_PATH),
-            joblib.load(LC_PATH),
-        )
-
-    # ── Load CSVs ──
-    for paths in [("Fake.csv.zip", "True.csv.zip"), ("Fake.csv", "True.csv")]:
-        try:
-            fake = pd.read_csv(paths[0])
-            true = pd.read_csv(paths[1])
-            break
-        except FileNotFoundError:
-            continue
-    else:
-        return None, None, 0.0, None, None, None, None
-
-    fake["label"] = 0
-    true["label"] = 1
-    data = pd.concat([fake, true]).sample(frac=1, random_state=42).reset_index(drop=True)
-
-    if "title" in data.columns:
-        data["full_text"] = data["text"].fillna("") + " " + data["title"].fillna("")
-    else:
-        data["full_text"] = data["text"].fillna("")
-
-    X_raw = data["full_text"].apply(clean_text)
-    y     = data["label"]
-
-    vectorizer = TfidfVectorizer(
-        stop_words="english", max_df=0.7, min_df=3,
-        ngram_range=(1, 2), max_features=60000, sublinear_tf=True
-    )
-    X_vec = vectorizer.fit_transform(X_raw)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_vec, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    model = LogisticRegression(C=5.0, max_iter=1000, solver="lbfgs")
-    model.fit(X_train, y_train)
-
-    y_pred  = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)[:, 1]
-
-    accuracy = float(accuracy_score(y_test, y_pred))
-    rep      = classification_report(y_test, y_pred, output_dict=True)
-    cm_mat   = confusion_matrix(y_test, y_pred)
-
-    # ROC curve
-    fpr, tpr, _ = roc_curve(y_test, y_proba)
-    roc_auc      = float(auc(fpr, tpr))
-    roc_data     = {"fpr": fpr.tolist(), "tpr": tpr.tolist(), "auc": roc_auc}
-
-    # Learning curve (subsample for speed)
-    train_sizes = np.linspace(0.1, 1.0, 8)
-    lc_sizes, lc_train, lc_val = learning_curve(
-        LogisticRegression(C=5.0, max_iter=500, solver="lbfgs"),
-        X_vec, y, cv=3, train_sizes=train_sizes,
-        scoring="accuracy", n_jobs=-1
-    )
-    lc_data = {
-        "sizes":      lc_sizes.tolist(),
-        "train_mean": lc_train.mean(axis=1).tolist(),
-        "train_std":  lc_train.std(axis=1).tolist(),
-        "val_mean":   lc_val.mean(axis=1).tolist(),
-        "val_std":    lc_val.std(axis=1).tolist(),
-    }
-
-    # Save everything
-    joblib.dump(model,      MODEL_PATH)
-    joblib.dump(vectorizer, VEC_PATH)
-    joblib.dump(accuracy,   ACC_PATH)
-    joblib.dump(rep,        REPORT_PATH)
-    joblib.dump(cm_mat,     CM_PATH)
-    joblib.dump(roc_data,   ROC_PATH)
-    joblib.dump(lc_data,    LC_PATH)
-
-    return model, vectorizer, accuracy, rep, cm_mat, roc_data, lc_data
-
-
-def predict(text, model, vectorizer):
-    cleaned = clean_text(text)
-    vec     = vectorizer.transform([cleaned])
-    pred    = int(model.predict(vec)[0])
-    proba   = model.predict_proba(vec)[0]
-    return pred, float(proba[1] * 100), float(proba[0] * 100)
 
 
 # ── Plotly dark theme shortcut ──
@@ -326,13 +228,171 @@ def dark_layout(**kwargs):
 
 
 # ================================================
-# LOAD MODEL
+# DATASET LOADER  — SPECIFIC FILE ONLY
 # ================================================
-with st.spinner("🔄 Loading / training model — please wait..."):
-    result = load_or_train_model()
+def load_dataset():
+    """
+    Loads WELFake. ONLY checks for 'WELFake_Dataset.csv.zip'.
+    """
+    zip_filename = "WELFake_Dataset.csv.zip"
+    
+    if os.path.exists(zip_filename):
+        with zipfile.ZipFile(zip_filename) as z:
+            csv_files = [f for f in z.namelist() if f.endswith(".csv")]
+            if not csv_files:
+                raise ValueError("No CSV file found inside Zip.")
+            csv_file = csv_files[0]
+            
+            with z.open(csv_file) as f:
+                data = pd.read_csv(f)
+        
+        # Combine title and text
+        data["full_text"] = (
+            data.get("title", pd.Series([""] * len(data))).fillna("") + " " +
+            data.get("text",  pd.Series([""] * len(data))).fillna("")
+        )
+        data = data.dropna(subset=["label"])
+        data["label"] = data["label"].astype(int)
+        
+        # Sample 40k for speed/accuracy balance
+        data = data.sample(n=40000, random_state=42).reset_index(drop=True)
+        return data[["full_text", "label"]]
 
-model, vectorizer, accuracy, report, cm, roc_data, lc_data = result
-model_ready = model is not None
+    # Fallback for Unzipped
+    csv_filename = "WELFake_Dataset.csv"
+    if os.path.exists(csv_filename):
+        data = pd.read_csv(csv_filename)
+        data["full_text"] = (
+            data.get("title", pd.Series([""] * len(data))).fillna("") + " " +
+            data.get("text",  pd.Series([""] * len(data))).fillna("")
+        )
+        data = data.dropna(subset=["label"])
+        data["label"] = data["label"].astype(int)
+        data = data.sample(n=40000, random_state=42).reset_index(drop=True)
+        return data[["full_text", "label"]]
+
+    raise FileNotFoundError(
+        f"Dataset not found.\nPlease ensure '{zip_filename}' is in the app folder."
+    )
+
+
+# ================================================
+# MODEL TRAIN / LOAD
+# ================================================
+MODEL_PATH  = "fake_news_model.pkl"
+VEC_PATH    = "vectorizer.pkl"
+ACC_PATH    = "accuracy.pkl"
+REPORT_PATH = "report.pkl"
+CM_PATH     = "cm.pkl"
+ROC_PATH    = "roc.pkl"
+LC_PATH     = "lc.pkl"
+
+CACHE_FILES = [MODEL_PATH, VEC_PATH, ACC_PATH, REPORT_PATH, CM_PATH, ROC_PATH, LC_PATH]
+
+
+@st.cache_resource(show_spinner=False)
+def load_or_train_model():
+    # ── Load from disk if all cache files exist ──
+    if all(os.path.exists(p) for p in CACHE_FILES):
+        return (
+            joblib.load(MODEL_PATH),
+            joblib.load(VEC_PATH),
+            joblib.load(ACC_PATH),
+            joblib.load(REPORT_PATH),
+            joblib.load(CM_PATH),
+            joblib.load(ROC_PATH),
+            joblib.load(LC_PATH),
+        )
+
+    # ── Load dataset ──
+    data = load_dataset()
+
+    X_raw = data["full_text"].apply(clean_text)
+    y     = data["label"]
+
+    vectorizer = TfidfVectorizer(
+        stop_words="english",
+        max_df=0.7,
+        min_df=3,
+        ngram_range=(1, 2), 
+        max_features=15000, 
+        sublinear_tf=True,
+    )
+    X_vec = vectorizer.fit_transform(X_raw)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_vec, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    model = LogisticRegression(C=5.0, max_iter=300, solver="sag", n_jobs=-1)
+    model.fit(X_train, y_train)
+
+    y_pred  = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+
+    accuracy_val = float(accuracy_score(y_test, y_pred))
+    rep          = classification_report(y_test, y_pred, output_dict=True)
+    cm_mat       = confusion_matrix(y_test, y_pred)
+
+    # ROC curve
+    fpr, tpr, _ = roc_curve(y_test, y_proba)
+    roc_auc     = float(auc(fpr, tpr))
+    roc_data    = {"fpr": fpr.tolist(), "tpr": tpr.tolist(), "auc": roc_auc}
+
+    # Learning Curve (Subset for speed)
+    lc_subset_size = 10000
+    if X_vec.shape[0] > lc_subset_size:
+        X_lc = X_vec[:lc_subset_size]
+        y_lc = y[:lc_subset_size]
+    else:
+        X_lc = X_vec
+        y_lc = y
+
+    train_sizes, train_scores, val_scores = learning_curve(
+        LogisticRegression(C=5.0, max_iter=200, solver="sag"),
+        X_lc, y_lc,
+        cv=2, 
+        train_sizes=np.linspace(0.2, 1.0, 4),
+        scoring="accuracy",
+        n_jobs=-1,
+    )
+    lc_data = {
+        "sizes":      train_sizes.tolist(),
+        "train_mean": train_scores.mean(axis=1).tolist(),
+        "train_std":  train_scores.std(axis=1).tolist(),
+        "val_mean":   val_scores.mean(axis=1).tolist(),
+        "val_std":    val_scores.std(axis=1).tolist(),
+    }
+
+    # Persist to disk
+    joblib.dump(model,        MODEL_PATH)
+    joblib.dump(vectorizer,   VEC_PATH)
+    joblib.dump(accuracy_val, ACC_PATH)
+    joblib.dump(rep,          REPORT_PATH)
+    joblib.dump(cm_mat,       CM_PATH)
+    joblib.dump(roc_data,     ROC_PATH)
+    joblib.dump(lc_data,      LC_PATH)
+
+    return model, vectorizer, accuracy_val, rep, cm_mat, roc_data, lc_data
+
+
+def predict(text, model, vectorizer, threshold=0.5):
+    """
+    Predicts class based on threshold.
+    If prob_real > threshold -> Real, else Fake.
+    """
+    cleaned = clean_text(text)
+    vec     = vectorizer.transform([cleaned])
+    proba   = model.predict_proba(vec)[0]
+    
+    prob_real = float(proba[1] * 100)
+    prob_fake = float(proba[0] * 100)
+    
+    # APPLY THRESHOLD HERE
+    # Default is 0.5 (50%), but we will pass 0.60 (60%) from slider
+    pred = 1 if (proba[1] > threshold) else 0
+    
+    return pred, prob_real, prob_fake
 
 
 # ================================================
@@ -348,44 +408,82 @@ with st.sidebar:
         "<div style='font-size:11px;color:#5a6e9a;letter-spacing:2px;"
         "text-transform:uppercase;margin-top:4px;'>Fake News Detector</div>"
         "</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
+    st.markdown("---")
+    
+    # NEW: SKEPTICISM SLIDER
+    st.markdown("### 🛡️ Detection Strictness")
+    st.caption("Higher value = Harder to prove news is 'Real'.")
+    # Default 0.60 means model needs to be 60% sure it's Real, otherwise it calls it Fake.
+    # This helps catch borderline fake news like the chocolate example.
+    strictness = st.slider(
+        "Threshold", 
+        min_value=0.5, 
+        max_value=0.8, 
+        value=0.60, 
+        step=0.05, 
+        format="%.2f"
+    )
+    st.caption(f"Current: Real only if > {strictness*100:.0f}% sure.")
+    
     st.markdown("---")
     st.markdown(
         "<div style='font-size:11px;color:#5a6e9a;letter-spacing:2px;"
         "text-transform:uppercase;margin-bottom:10px;'>Navigation</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
-    page = st.radio("", ["🔍  Analyze News", "📊  Model Stats", "📖  About"],
-                    label_visibility="collapsed")
+    page = st.radio(
+        "", ["🔍  Analyze News", "📊  Model Stats", "📖  About"],
+        label_visibility="collapsed",
+    )
     page = page.split("  ")[1]
     st.markdown("---")
     st.markdown(
         "<div style='font-size:12px;color:#5a6e9a;line-height:1.9;'>"
-        "<div style='color:#dce8ff;font-weight:500;margin-bottom:8px;'>How it works</div>"
-        "Uses <span style='color:#00e5ff;'>TF-IDF bigrams</span> with "
-        "<span style='color:#00ff9d;'>Logistic Regression</span> "
-        "trained on thousands of real &amp; fake news articles."
+        "<div style='color:#dce8ff;font-weight:500;margin-bottom:8px;'>Status</div>"
+        "Training on <b>WELFake_Dataset.csv.zip</b>.<br/>"
+        "Uses <span style='color:#00e5ff;'>Bigrams (1,2)</span> & <span style='color:#00ff9d;'>15k Features</span>."
         "</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
     st.markdown("---")
-    if model_ready:
-        st.markdown(
-            f"<div style='text-align:center;font-size:12px;color:#5a6e9a;'>"
-            f"Model accuracy<br/>"
-            f"<span style='font-family:Syne,sans-serif;font-size:22px;font-weight:700;"
-            f"color:#00e5ff;'>{accuracy*100:.2f}%</span></div>",
-            unsafe_allow_html=True
-        )
-        if roc_data:
-            st.markdown(
-                f"<div style='text-align:center;font-size:12px;color:#5a6e9a;margin-top:10px;'>"
-                f"ROC-AUC Score<br/>"
-                f"<span style='font-family:Syne,sans-serif;font-size:22px;font-weight:700;"
-                f"color:#a855f7;'>{roc_data['auc']:.4f}</span></div>",
-                unsafe_allow_html=True
-            )
+    
+    if st.button("🔄 Reset / Retrain"):
+        for f in CACHE_FILES:
+            if os.path.exists(f):
+                os.remove(f)
+        st.cache_resource.clear()
+        st.rerun()
+
+
+# ================================================
+# LOAD MODEL
+# ================================================
+model_ready = False
+model = vectorizer = accuracy = report = cm = roc_data = lc_data = None
+load_error = None
+
+with st.spinner("🔄 Loading / training model — please wait..."):
+    try:
+        model, vectorizer, accuracy, report, cm, roc_data, lc_data = load_or_train_model()
+        model_ready = True
+    except FileNotFoundError as e:
+        load_error = str(e)
+    except Exception as e:
+        load_error = f"Unexpected error: {e}"
+
+# Show Accuracy in Sidebar if Ready
+if model_ready:
+    st.markdown(
+        f"<div style='text-align:center;font-size:12px;color:#5a6e9a;'>"
+        f"Model accuracy<br/>"
+        f"<span style='font-family:Syne,sans-serif;font-size:22px;font-weight:700;"
+        f"color:#00e5ff;'>{accuracy * 100:.2f}%</span></div>",
+        unsafe_allow_html=True,
+    )
+elif load_error:
+    st.markdown(f"<div style='color:#ff3d6e;font-size:12px;'>⚠️ Model not loaded</div>", unsafe_allow_html=True)
 
 
 # ================================================
@@ -411,20 +509,35 @@ st.markdown(
     "max-width:440px;margin:0 auto;'>"
     "Detect misinformation with machine-learning precision"
     "</div></div>",
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
-# ╔══════════════════════════════════════════════╗
+# ╔════════════════════════════════════════════╗
 # ║              PAGE: ANALYZE NEWS              ║
-# ╚══════════════════════════════════════════════╝
+# ╚════════════════════════════════════════════╝
 if page == "Analyze News":
+
+    # Show load error prominently
+    if load_error:
+        st.markdown(
+            f"<div style='background:rgba(255,61,110,0.07);border:1px solid rgba(255,61,110,0.3);"
+            f"border-radius:14px;padding:22px 24px;color:#ff3d6e;'>"
+            f"<b>❌ Dataset not found</b><br/><br/>"
+            f"<span style='color:#8a9fc0;white-space:pre-wrap;'>{load_error}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        st.stop()
 
     if model_ready:
         c1, c2, c3, c4 = st.columns(4)
-        with c1: st.markdown(neon_metric("Accuracy",  f"{accuracy*100:.2f}", "#00e5ff", "%"), unsafe_allow_html=True)
-        with c2: st.markdown(neon_metric("Algorithm", "LogReg",   "#a855f7"), unsafe_allow_html=True)
-        with c3: st.markdown(neon_metric("Features",  "60K",      "#00ff9d"), unsafe_allow_html=True)
+        with c1:
+            st.markdown(neon_metric("Accuracy", f"{accuracy * 100:.2f}", "#00e5ff", "%"), unsafe_allow_html=True)
+        with c2:
+            st.markdown(neon_metric("Algorithm", "SAG LogReg", "#a855f7"), unsafe_allow_html=True)
+        with c3:
+            st.markdown(neon_metric("Features", "15K", "#00ff9d"), unsafe_allow_html=True) 
         with c4:
             auc_val = f"{roc_data['auc']:.4f}" if roc_data else "N/A"
             st.markdown(neon_metric("ROC-AUC", auc_val, "#ffb300"), unsafe_allow_html=True)
@@ -438,13 +551,15 @@ if page == "Analyze News":
         "<div style='font-size:11px;letter-spacing:2px;text-transform:uppercase;"
         "color:#5a6e9a;margin-bottom:10px;'>Paste News Article</div>"
         "</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     news_text = st.text_area(
-        "", height=190,
+        "",
+        height=190,
         placeholder="Paste a news headline, paragraph, or full article here...",
-        label_visibility="collapsed", key="news_input"
+        label_visibility="collapsed",
+        key="news_input",
     )
 
     word_count = len(news_text.split()) if news_text.strip() else 0
@@ -454,12 +569,14 @@ if page == "Analyze News":
             f"<div style='color:#5a6e9a;font-size:13px;padding-top:6px;'>"
             f"<span style='color:#00e5ff;'>{word_count}</span> words &nbsp;·&nbsp; "
             f"<span style='color:#00e5ff;'>{len(news_text)}</span> chars</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
     with btn_col:
         b1, b2 = st.columns(2)
-        with b1: analyze_clicked = st.button("🔍 Analyze", use_container_width=True)
-        with b2: clear_clicked   = st.button("✕ Clear",   use_container_width=True)
+        with b1:
+            analyze_clicked = st.button("🔍 Analyze", use_container_width=True)
+        with b2:
+            clear_clicked = st.button("✕ Clear", use_container_width=True)
 
     if clear_clicked:
         st.rerun()
@@ -476,7 +593,7 @@ if page == "Analyze News":
                 "marking the tenth consecutive increase as policymakers continue their effort "
                 "to bring inflation down from its four-decade high. The decision was unanimous "
                 "among the Federal Open Market Committee members.</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
         with s2:
             st.markdown(
@@ -487,7 +604,7 @@ if page == "Analyze News":
                 "SHOCKING: Scientists CONFIRM that drinking bleach cures all diseases! "
                 "The mainstream media is HIDING this miracle cure! Government is suppressing "
                 "this to keep big pharma profits flowing! SHARE before they DELETE THIS!!!</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
     st.markdown("<br/>", unsafe_allow_html=True)
@@ -498,57 +615,73 @@ if page == "Analyze News":
                 "<div style='background:rgba(255,179,0,0.07);border:1px solid rgba(255,179,0,0.3);"
                 "border-radius:14px;padding:18px 24px;color:#ffb300;text-align:center;'>"
                 "⚠️ Please enter a news article to analyze.</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
         elif not model_ready:
             st.markdown(
                 "<div style='background:rgba(255,61,110,0.07);border:1px solid rgba(255,61,110,0.3);"
                 "border-radius:14px;padding:18px 24px;color:#ff3d6e;text-align:center;'>"
-                "❌ Model not loaded. Ensure Fake.csv &amp; True.csv are in the project folder.</div>",
-                unsafe_allow_html=True
+                "❌ Model not loaded. Please add your dataset file and restart.</div>",
+                unsafe_allow_html=True,
             )
         else:
             prog = st.progress(0)
             stat = st.empty()
-            for pct, msg in [(15,"Preprocessing text…"),(40,"TF-IDF vectorizing…"),
-                             (65,"Running inference…"),(90,"Computing probabilities…"),(100,"Done ✓")]:
+            for pct, msg in [
+                (15, "Preprocessing text…"),
+                (40, "TF-IDF vectorizing…"),
+                (65, "Running inference…"),
+                (90, "Computing probabilities…"),
+                (100, "Done ✓"),
+            ]:
                 prog.progress(pct)
                 stat.markdown(
                     f"<div style='color:#5a6e9a;font-size:13px;text-align:center;'>{msg}</div>",
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
                 time.sleep(0.15)
-            prog.empty(); stat.empty()
+            prog.empty()
+            stat.empty()
 
-            pred, real_prob, fake_prob = predict(news_text, model, vectorizer)
+            # PASS STRICTNESS HERE
+            pred, real_prob, fake_prob = predict(news_text, model, vectorizer, threshold=strictness)
 
             st.markdown("<br/>", unsafe_allow_html=True)
             left, right = st.columns([1.15, 1])
             with left:
                 if pred == 1:
-                    st.markdown(result_card("REAL","✅","#00ff9d", real_prob,"#00e5ff"), unsafe_allow_html=True)
+                    st.markdown(result_card("REAL", "✅", "#00ff9d", real_prob, "#00e5ff"), unsafe_allow_html=True)
                 else:
-                    st.markdown(result_card("FAKE","🚨","#ff3d6e", fake_prob,"#ff6b35"), unsafe_allow_html=True)
+                    st.markdown(result_card("FAKE", "🚨", "#ff3d6e", fake_prob, "#ff6b35"), unsafe_allow_html=True)
 
             with right:
                 fig = go.Figure(go.Pie(
-                    values=[fake_prob, real_prob], labels=["Fake","Real"], hole=0.65,
-                    marker=dict(colors=["#ff3d6e","#00ff9d"], line=dict(color="#04060f", width=3)),
+                    values=[fake_prob, real_prob],
+                    labels=["Fake", "Real"],
+                    hole=0.65,
+                    marker=dict(colors=["#ff3d6e", "#00ff9d"], line=dict(color="#04060f", width=3)),
                     textinfo="percent",
                     textfont=dict(size=13, family="DM Sans", color="white"),
-                    hovertemplate="%{label}: %{value:.1f}%<extra></extra>"
+                    hovertemplate="%{label}: %{value:.1f}%<extra></extra>",
                 ))
-                fig.add_annotation(text="REAL" if pred==1 else "FAKE",
-                                   x=0.5, y=0.54, showarrow=False,
-                                   font=dict(size=19, family="Syne", color="#00e5ff"))
-                fig.add_annotation(text=f"{real_prob if pred==1 else fake_prob:.0f}%",
-                                   x=0.5, y=0.38, showarrow=False,
-                                   font=dict(size=13, family="DM Sans", color="#5a6e9a"))
+                fig.add_annotation(
+                    text="REAL" if pred == 1 else "FAKE",
+                    x=0.5, y=0.54, showarrow=False,
+                    font=dict(size=19, family="Syne", color="#00e5ff"),
+                )
+                fig.add_annotation(
+                    text=f"{real_prob if pred == 1 else fake_prob:.0f}%",
+                    x=0.5, y=0.38, showarrow=False,
+                    font=dict(size=13, family="DM Sans", color="#5a6e9a"),
+                )
                 fig.update_layout(**dark_layout(
-                    margin=dict(l=10,r=10,t=10,b=40), height=258,
+                    margin=dict(l=10, r=10, t=10, b=40),
+                    height=258,
                     showlegend=True,
-                    legend=dict(orientation="h", x=0.5, xanchor="center", y=-0.05,
-                                font=dict(size=12, color="#dce8ff"))
+                    legend=dict(
+                        orientation="h", x=0.5, xanchor="center", y=-0.05,
+                        font=dict(size=12, color="#dce8ff"),
+                    ),
                 ))
                 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
@@ -556,59 +689,68 @@ if page == "Analyze News":
             st.markdown(
                 "<div style='font-size:11px;letter-spacing:2px;text-transform:uppercase;"
                 "color:#5a6e9a;margin-bottom:12px;'>Probability Breakdown</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
             pb1, pb2 = st.columns(2)
-            with pb1: st.markdown(prob_bar("Real News", real_prob, "#00ff9d"), unsafe_allow_html=True)
-            with pb2: st.markdown(prob_bar("Fake News", fake_prob, "#ff3d6e"), unsafe_allow_html=True)
+            with pb1:
+                st.markdown(prob_bar("Real News", real_prob, "#00ff9d"), unsafe_allow_html=True)
+            with pb2:
+                st.markdown(prob_bar("Fake News", fake_prob, "#ff3d6e"), unsafe_allow_html=True)
 
             st.markdown("<br/>", unsafe_allow_html=True)
             st.markdown(
                 "<div style='font-size:11px;letter-spacing:2px;text-transform:uppercase;"
                 "color:#5a6e9a;margin-bottom:10px;'>Was this prediction correct?</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
-            fb1, fb2, _ = st.columns([1,1,3])
+            fb1, fb2, _ = st.columns([1, 1, 3])
             with fb1:
                 if st.button("👍  Yes"):
-                    st.markdown("<div style='color:#00ff9d;font-size:13px;'>Thank you! ✓</div>", unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='color:#00ff9d;font-size:13px;'>Thank you! ✓</div>",
+                        unsafe_allow_html=True,
+                    )
             with fb2:
                 if st.button("👎  No"):
-                    st.markdown("<div style='color:#ff3d6e;font-size:13px;'>Thanks for the feedback!</div>", unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='color:#ff3d6e;font-size:13px;'>Thanks for feedback!</div>",
+                        unsafe_allow_html=True,
+                    )
 
 
-# ╔══════════════════════════════════════════════╗
+# ╔════════════════════════════════════════════╗
 # ║             PAGE: MODEL STATS                ║
-# ╚══════════════════════════════════════════════╝
+# ╚════════════════════════════════════════════╝
 elif page == "Model Stats":
     st.markdown(
         "<div style='font-family:Syne,sans-serif;font-size:28px;font-weight:700;"
         "margin-bottom:6px;color:#dce8ff;'>Model Performance</div>"
         "<div style='color:#5a6e9a;font-size:14px;margin-bottom:24px;'>"
         "Complete evaluation on 20% held-out test set</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     if not model_ready:
         st.markdown(
-            "<div style='background:rgba(255,179,0,0.07);border:1px solid rgba(255,179,0,0.3);"
-            "border-radius:14px;padding:24px;text-align:center;color:#ffb300;'>"
-            "⚠️ Model not trained yet. Add Fake.csv and True.csv and restart.</div>",
-            unsafe_allow_html=True
+            f"<div style='background:rgba(255,179,0,0.07);border:1px solid rgba(255,179,0,0.3);"
+            f"border-radius:14px;padding:24px;text-align:center;color:#ffb300;'>"
+            f"⚠️ {load_error or 'Model not trained yet.'}</div>",
+            unsafe_allow_html=True,
         )
         st.stop()
 
     # ── Top KPI strip ──
     m1, m2, m3, m4, m5 = st.columns(5)
-    with m1: st.metric("Accuracy",  f"{accuracy*100:.2f}%")
+    with m1:
+        st.metric("Accuracy", f"{accuracy * 100:.2f}%")
     with m2:
-        prec = report["weighted avg"]["precision"]*100 if report else 0
+        prec = report["weighted avg"]["precision"] * 100 if report else 0
         st.metric("Precision", f"{prec:.2f}%")
     with m3:
-        rec = report["weighted avg"]["recall"]*100 if report else 0
+        rec = report["weighted avg"]["recall"] * 100 if report else 0
         st.metric("Recall", f"{rec:.2f}%")
     with m4:
-        f1 = report["weighted avg"]["f1-score"]*100 if report else 0
+        f1 = report["weighted avg"]["f1-score"] * 100 if report else 0
         st.metric("F1-Score", f"{f1:.2f}%")
     with m5:
         auc_val = roc_data["auc"] if roc_data else 0
@@ -630,39 +772,54 @@ elif page == "Model Stats":
     with tab1:
         if report:
             st.markdown(section_header("Per-Class Performance"), unsafe_allow_html=True)
+            class_0_key = "0" if "0" in report else list(report.keys())[0]
+            class_1_key = "1" if "1" in report else list(report.keys())[1]
+
             fig_bar = go.Figure()
-            for metric, color in [("precision","#ff3d6e"),("recall","#00ff9d"),("f1-score","#00e5ff")]:
+            for metric, color in [("precision", "#ff3d6e"), ("recall", "#00ff9d"), ("f1-score", "#00e5ff")]:
                 fig_bar.add_trace(go.Bar(
                     name=metric.capitalize(),
                     x=["Fake (0)", "Real (1)"],
-                    y=[round(report["0"][metric]*100,2), round(report["1"][metric]*100,2)],
-                    marker_color=color, marker_line_color="rgba(0,0,0,0)", opacity=0.88,
-                    text=[f"{report['0'][metric]*100:.1f}%", f"{report['1'][metric]*100:.1f}%"],
+                    y=[
+                        round(report[class_0_key][metric] * 100, 2),
+                        round(report[class_1_key][metric] * 100, 2),
+                    ],
+                    marker_color=color,
+                    marker_line_color="rgba(0,0,0,0)",
+                    opacity=0.88,
+                    text=[
+                        f"{report[class_0_key][metric] * 100:.1f}%",
+                        f"{report[class_1_key][metric] * 100:.1f}%",
+                    ],
                     textposition="outside",
                     textfont=dict(size=13, color="#dce8ff"),
                 ))
             fig_bar.update_layout(**dark_layout(
                 barmode="group",
-                margin=dict(l=20,r=20,t=50,b=20),
+                margin=dict(l=20, r=20, t=50, b=20),
                 xaxis=dict(gridcolor="#1a2540"),
-                yaxis=dict(gridcolor="#1a2540", range=[0,115], ticksuffix="%"),
+                yaxis=dict(gridcolor="#1a2540", range=[0, 115], ticksuffix="%"),
                 legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center"),
                 height=400,
-                title=dict(text="Precision · Recall · F1-Score by Class",
-                           font=dict(size=15, color="#dce8ff"))
+                title=dict(
+                    text="Precision · Recall · F1-Score by Class",
+                    font=dict(size=15, color="#dce8ff"),
+                ),
             ))
             st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar": False})
 
-            # Support counts
             st.markdown("<br/>", unsafe_allow_html=True)
             st.markdown(section_header("Support (sample count per class)"), unsafe_allow_html=True)
-            fake_sup = int(report["0"]["support"])
-            real_sup = int(report["1"]["support"])
+            fake_sup = int(report[class_0_key]["support"])
+            real_sup = int(report[class_1_key]["support"])
             total    = fake_sup + real_sup
             sa, sb, sc = st.columns(3)
-            with sa: st.markdown(neon_metric("Fake Samples", f"{fake_sup:,}", "#ff3d6e"), unsafe_allow_html=True)
-            with sb: st.markdown(neon_metric("Real Samples", f"{real_sup:,}", "#00ff9d"), unsafe_allow_html=True)
-            with sc: st.markdown(neon_metric("Total Test",   f"{total:,}",    "#00e5ff"), unsafe_allow_html=True)
+            with sa:
+                st.markdown(neon_metric("Fake Samples", f"{fake_sup:,}", "#ff3d6e"), unsafe_allow_html=True)
+            with sb:
+                st.markdown(neon_metric("Real Samples", f"{real_sup:,}", "#00ff9d"), unsafe_allow_html=True)
+            with sc:
+                st.markdown(neon_metric("Total Test", f"{total:,}", "#00e5ff"), unsafe_allow_html=True)
         else:
             st.info("Retrain model to view metrics.")
 
@@ -671,24 +828,26 @@ elif page == "Model Stats":
         if cm is not None:
             st.markdown(section_header("Confusion Matrix"), unsafe_allow_html=True)
 
-            # Normalised + raw side-by-side
             col_a, col_b = st.columns(2)
 
             with col_a:
                 st.markdown(
                     "<div style='font-size:12px;color:#5a6e9a;text-align:center;"
                     "margin-bottom:6px;'>Raw Counts</div>",
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
                 fig_cm_raw = px.imshow(
-                    cm, labels=dict(x="Predicted", y="Actual", color="Count"),
-                    x=["Fake","Real"], y=["Fake","Real"],
-                    color_continuous_scale=[[0,"#090e1d"],[0.5,"#1e3a5f"],[1,"#00e5ff"]],
+                    cm,
+                    labels=dict(x="Predicted", y="Actual", color="Count"),
+                    x=["Fake", "Real"],
+                    y=["Fake", "Real"],
+                    color_continuous_scale=[[0, "#090e1d"], [0.5, "#1e3a5f"], [1, "#00e5ff"]],
                     text_auto=True,
                 )
                 fig_cm_raw.update_traces(textfont=dict(size=20, family="Syne", color="white"))
                 fig_cm_raw.update_layout(**dark_layout(
-                    margin=dict(l=20,r=20,t=20,b=20), height=320,
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    height=320,
                     coloraxis_showscale=False,
                 ))
                 st.plotly_chart(fig_cm_raw, use_container_width=True, config={"displayModeBar": False})
@@ -697,30 +856,36 @@ elif page == "Model Stats":
                 st.markdown(
                     "<div style='font-size:12px;color:#5a6e9a;text-align:center;"
                     "margin-bottom:6px;'>Normalised (%)</div>",
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
                 cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True) * 100
                 fig_cm_norm = px.imshow(
-                    cm_norm, labels=dict(x="Predicted", y="Actual", color="%"),
-                    x=["Fake","Real"], y=["Fake","Real"],
-                    color_continuous_scale=[[0,"#090e1d"],[0.5,"#1a3a20"],[1,"#00ff9d"]],
+                    cm_norm,
+                    labels=dict(x="Predicted", y="Actual", color="%"),
+                    x=["Fake", "Real"],
+                    y=["Fake", "Real"],
+                    color_continuous_scale=[[0, "#090e1d"], [0.5, "#1e3a20"], [1, "#00ff9d"]],
                     text_auto=".1f",
                 )
                 fig_cm_norm.update_traces(textfont=dict(size=20, family="Syne", color="white"))
                 fig_cm_norm.update_layout(**dark_layout(
-                    margin=dict(l=20,r=20,t=20,b=20), height=320,
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    height=320,
                     coloraxis_showscale=False,
                 ))
                 st.plotly_chart(fig_cm_norm, use_container_width=True, config={"displayModeBar": False})
 
-            # Interpretation cards
             tn, fp, fn, tp = cm.ravel()
             st.markdown("<br/>", unsafe_allow_html=True)
             i1, i2, i3, i4 = st.columns(4)
-            with i1: st.markdown(neon_metric("True Negatives",  f"{tn:,}", "#00ff9d"), unsafe_allow_html=True)
-            with i2: st.markdown(neon_metric("False Positives", f"{fp:,}", "#ffb300"), unsafe_allow_html=True)
-            with i3: st.markdown(neon_metric("False Negatives", f"{fn:,}", "#ff3d6e"), unsafe_allow_html=True)
-            with i4: st.markdown(neon_metric("True Positives",  f"{tp:,}", "#00e5ff"), unsafe_allow_html=True)
+            with i1:
+                st.markdown(neon_metric("True Negatives", f"{tn:,}", "#00ff9d"), unsafe_allow_html=True)
+            with i2:
+                st.markdown(neon_metric("False Positives", f"{fp:,}", "#ffb300"), unsafe_allow_html=True)
+            with i3:
+                st.markdown(neon_metric("False Negatives", f"{fn:,}", "#ff3d6e"), unsafe_allow_html=True)
+            with i4:
+                st.markdown(neon_metric("True Positives", f"{tp:,}", "#00e5ff"), unsafe_allow_html=True)
         else:
             st.info("Retrain model to view confusion matrix.")
 
@@ -734,37 +899,42 @@ elif page == "Model Stats":
             roc_auc  = roc_data["auc"]
 
             fig_roc = go.Figure()
-            # Diagonal baseline
             fig_roc.add_trace(go.Scatter(
-                x=[0,1], y=[0,1], mode="lines",
+                x=[0, 1], y=[0, 1], mode="lines",
                 line=dict(color="#1a2540", width=1.5, dash="dash"),
                 name="Random Classifier",
-                hoverinfo="skip"
+                hoverinfo="skip",
             ))
-            # ROC curve with gradient fill
             fig_roc.add_trace(go.Scatter(
                 x=fpr_list, y=tpr_list, mode="lines",
                 line=dict(color="#00e5ff", width=2.5),
                 fill="tozeroy",
                 fillcolor="rgba(0,229,255,0.08)",
                 name=f"TruthLens (AUC = {roc_auc:.4f})",
-                hovertemplate="FPR: %{x:.3f}<br>TPR: %{y:.3f}<extra></extra>"
+                hovertemplate="FPR: %{x:.3f}<br>TPR: %{y:.3f}<extra></extra>",
             ))
             fig_roc.update_layout(**dark_layout(
-                margin=dict(l=30,r=20,t=60,b=30),
+                margin=dict(l=30, r=20, t=60, b=30),
                 height=420,
-                xaxis=dict(title="False Positive Rate", gridcolor="#1a2540", range=[0,1]),
-                yaxis=dict(title="True Positive Rate",  gridcolor="#1a2540", range=[0,1.02]),
-                legend=dict(x=0.55, y=0.05, bgcolor="rgba(0,0,0,0)",
-                            font=dict(size=13, color="#dce8ff")),
-                title=dict(text=f"ROC Curve  ·  AUC = {roc_auc:.4f}",
-                           font=dict(size=15, color="#dce8ff"))
+                xaxis=dict(title="False Positive Rate", gridcolor="#1a2540", range=[0, 1]),
+                yaxis=dict(title="True Positive Rate",  gridcolor="#1a2540", range=[0, 1.02]),
+                legend=dict(
+                    x=0.55, y=0.05, bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=13, color="#dce8ff"),
+                ),
+                title=dict(
+                    text=f"ROC Curve  ·  AUC = {roc_auc:.4f}",
+                    font=dict(size=15, color="#dce8ff"),
+                ),
             ))
             st.plotly_chart(fig_roc, use_container_width=True, config={"displayModeBar": False})
 
             ra, rb = st.columns(2)
-            with ra: st.markdown(neon_metric("AUC Score", f"{roc_auc:.4f}", "#a855f7"), unsafe_allow_html=True)
-            with rb: st.markdown(neon_metric("Interpretation", "Excellent" if roc_auc > 0.97 else "Good", "#00ff9d"), unsafe_allow_html=True)
+            with ra:
+                st.markdown(neon_metric("AUC Score", f"{roc_auc:.4f}", "#a855f7"), unsafe_allow_html=True)
+            with rb:
+                interp = "Excellent" if roc_auc > 0.97 else "Good"
+                st.markdown(neon_metric("Interpretation", interp, "#00ff9d"), unsafe_allow_html=True)
         else:
             st.info("Retrain model to generate ROC curve.")
 
@@ -781,59 +951,64 @@ elif page == "Model Stats":
 
             fig_lc = go.Figure()
 
-            # Train std band
+            # Shaded bands
             fig_lc.add_trace(go.Scatter(
                 x=sizes + sizes[::-1],
-                y=[m+s for m,s in zip(train_mean, train_std)] +
-                  [m-s for m,s in zip(train_mean[::-1], train_std[::-1])],
+                y=[m + s for m, s in zip(train_mean, train_std)] +
+                  [m - s for m, s in zip(reversed(train_mean), reversed(train_std))],
                 fill="toself", fillcolor="rgba(0,229,255,0.07)",
-                line=dict(color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip"
+                line=dict(color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip",
             ))
-            # Val std band
             fig_lc.add_trace(go.Scatter(
                 x=sizes + sizes[::-1],
-                y=[m+s for m,s in zip(val_mean, val_std)] +
-                  [m-s for m,s in zip(val_mean[::-1], val_std[::-1])],
+                y=[m + s for m, s in zip(val_mean, val_std)] +
+                  [m - s for m, s in zip(reversed(val_mean), reversed(val_std))],
                 fill="toself", fillcolor="rgba(0,255,157,0.07)",
-                line=dict(color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip"
+                line=dict(color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip",
             ))
-            # Train line
             fig_lc.add_trace(go.Scatter(
-                x=sizes, y=[round(v*100,2) for v in train_mean],
+                x=sizes, y=[round(v * 100, 2) for v in train_mean],
                 mode="lines+markers", name="Training Score",
                 line=dict(color="#00e5ff", width=2.5),
                 marker=dict(size=7, color="#00e5ff"),
-                hovertemplate="Samples: %{x}<br>Accuracy: %{y:.2f}%<extra>Train</extra>"
+                hovertemplate="Samples: %{x}<br>Accuracy: %{y:.2f}%<extra>Train</extra>",
             ))
-            # Val line
             fig_lc.add_trace(go.Scatter(
-                x=sizes, y=[round(v*100,2) for v in val_mean],
+                x=sizes, y=[round(v * 100, 2) for v in val_mean],
                 mode="lines+markers", name="Validation Score",
                 line=dict(color="#00ff9d", width=2.5),
                 marker=dict(size=7, color="#00ff9d"),
-                hovertemplate="Samples: %{x}<br>Accuracy: %{y:.2f}%<extra>Val</extra>"
+                hovertemplate="Samples: %{x}<br>Accuracy: %{y:.2f}%<extra>Val</extra>",
             ))
             fig_lc.update_layout(**dark_layout(
-                margin=dict(l=30,r=20,t=60,b=30),
+                margin=dict(l=30, r=20, t=60, b=30),
                 height=420,
                 xaxis=dict(title="Training Samples", gridcolor="#1a2540"),
                 yaxis=dict(title="Accuracy (%)", gridcolor="#1a2540"),
-                legend=dict(x=0.65, y=0.05, bgcolor="rgba(0,0,0,0)",
-                            font=dict(size=13, color="#dce8ff")),
-                title=dict(text="Learning Curve  ·  Training vs Validation Accuracy",
-                           font=dict(size=15, color="#dce8ff"))
+                legend=dict(
+                    x=0.65, y=0.05, bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=13, color="#dce8ff"),
+                ),
+                title=dict(
+                    text="Learning Curve  ·  Training vs Validation Accuracy",
+                    font=dict(size=15, color="#dce8ff"),
+                ),
             ))
             st.plotly_chart(fig_lc, use_container_width=True, config={"displayModeBar": False})
 
-            gap = abs(train_mean[-1] - val_mean[-1]) * 100
-            verdict = "Low overfitting ✓" if gap < 3 else ("Moderate overfitting" if gap < 8 else "High overfitting ✗")
+            gap     = abs(train_mean[-1] - val_mean[-1]) * 100
+            verdict = (
+                "Low overfitting ✓" if gap < 3
+                else ("Moderate overfitting" if gap < 8 else "High overfitting ✗")
+            )
             st.markdown(
                 f"<div style='background:#090e1d;border:1px solid #1a2540;border-radius:14px;"
                 f"padding:16px 20px;font-size:14px;color:#8a9fc0;'>"
-                f"Train–Val gap: <span style='color:#00e5ff;font-weight:600;'>{gap:.2f}%</span> &nbsp;·&nbsp; "
+                f"Train–Val gap: <span style='color:#00e5ff;font-weight:600;'>{gap:.2f}%</span>"
+                f" &nbsp;·&nbsp; "
                 f"Verdict: <span style='color:#00ff9d;font-weight:600;'>{verdict}</span>"
                 f"</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
         else:
             st.info("Retrain model to generate learning curve.")
@@ -843,81 +1018,94 @@ elif page == "Model Stats":
         if report:
             st.markdown(section_header("Class Balance in Test Set"), unsafe_allow_html=True)
 
-            fake_sup = int(report["0"]["support"])
-            real_sup = int(report["1"]["support"])
+            class_0_key = "0" if "0" in report else list(report.keys())[0]
+            class_1_key = "1" if "1" in report else list(report.keys())[1]
+            fake_sup = int(report[class_0_key]["support"])
+            real_sup = int(report[class_1_key]["support"])
             total    = fake_sup + real_sup
 
             col_pie, col_radar = st.columns(2)
 
-            # Pie chart
             with col_pie:
                 fig_pie = go.Figure(go.Pie(
                     values=[fake_sup, real_sup],
                     labels=["Fake News", "Real News"],
                     hole=0.5,
-                    marker=dict(colors=["#ff3d6e","#00ff9d"],
+                    marker=dict(colors=["#ff3d6e", "#00ff9d"],
                                 line=dict(color="#04060f", width=3)),
                     textinfo="percent+label",
                     textfont=dict(size=13, family="DM Sans", color="white"),
-                    hovertemplate="%{label}: %{value:,} samples<extra></extra>"
+                    hovertemplate="%{label}: %{value:,} samples<extra></extra>",
                 ))
                 fig_pie.add_annotation(
                     text=f"{total:,}<br><span style='font-size:11px;'>total</span>",
                     x=0.5, y=0.5, showarrow=False,
-                    font=dict(size=18, family="Syne", color="#dce8ff")
+                    font=dict(size=18, family="Syne", color="#dce8ff"),
                 )
                 fig_pie.update_layout(**dark_layout(
-                    margin=dict(l=10,r=10,t=30,b=10), height=320,
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    height=320,
                     showlegend=False,
-                    title=dict(text="Test Set Distribution", font=dict(size=14, color="#dce8ff"))
+                    title=dict(text="Test Set Distribution", font=dict(size=14, color="#dce8ff")),
                 ))
                 st.plotly_chart(fig_pie, use_container_width=True, config={"displayModeBar": False})
 
-            # Radar chart of all metrics
             with col_radar:
-                cats = ["Precision","Recall","F1-Score","Accuracy","AUC"]
+                cats = ["Precision", "Recall", "F1-Score", "Accuracy", "AUC"]
                 fake_vals = [
-                    report["0"]["precision"]*100,
-                    report["0"]["recall"]*100,
-                    report["0"]["f1-score"]*100,
-                    accuracy*100,
-                    roc_data["auc"]*100 if roc_data else 0,
+                    report[class_0_key]["precision"] * 100,
+                    report[class_0_key]["recall"] * 100,
+                    report[class_0_key]["f1-score"] * 100,
+                    accuracy * 100,
+                    roc_data["auc"] * 100 if roc_data else 0,
                 ]
                 real_vals = [
-                    report["1"]["precision"]*100,
-                    report["1"]["recall"]*100,
-                    report["1"]["f1-score"]*100,
-                    accuracy*100,
-                    roc_data["auc"]*100 if roc_data else 0,
+                    report[class_1_key]["precision"] * 100,
+                    report[class_1_key]["recall"] * 100,
+                    report[class_1_key]["f1-score"] * 100,
+                    accuracy * 100,
+                    roc_data["auc"] * 100 if roc_data else 0,
                 ]
                 fig_radar = go.Figure()
                 fig_radar.add_trace(go.Scatterpolar(
-                    r=fake_vals + [fake_vals[0]], theta=cats + [cats[0]],
-                    fill="toself", fillcolor="rgba(255,61,110,0.12)",
-                    line=dict(color="#ff3d6e", width=2), name="Fake (0)"
+                    r=fake_vals + [fake_vals[0]],
+                    theta=cats + [cats[0]],
+                    fill="toself",
+                    fillcolor="rgba(255,61,110,0.12)",
+                    line=dict(color="#ff3d6e", width=2),
+                    name="Fake (0)",
                 ))
                 fig_radar.add_trace(go.Scatterpolar(
-                    r=real_vals + [real_vals[0]], theta=cats + [cats[0]],
-                    fill="toself", fillcolor="rgba(0,255,157,0.12)",
-                    line=dict(color="#00ff9d", width=2), name="Real (1)"
+                    r=real_vals + [real_vals[0]],
+                    theta=cats + [cats[0]],
+                    fill="toself",
+                    fillcolor="rgba(0,255,157,0.12)",
+                    line=dict(color="#00ff9d", width=2),
+                    name="Real (1)",
                 ))
                 fig_radar.update_layout(
                     paper_bgcolor="rgba(0,0,0,0)",
                     polar=dict(
                         bgcolor="rgba(9,14,29,0.85)",
-                        radialaxis=dict(visible=True, range=[0,105],
-                                        gridcolor="#1a2540", tickcolor="#5a6e9a",
-                                        tickfont=dict(color="#5a6e9a", size=10)),
-                        angularaxis=dict(gridcolor="#1a2540",
-                                         tickfont=dict(color="#dce8ff", size=12))
+                        radialaxis=dict(
+                            visible=True, range=[0, 105],
+                            gridcolor="#1a2540", tickcolor="#5a6e9a",
+                            tickfont=dict(color="#5a6e9a", size=10),
+                        ),
+                        angularaxis=dict(
+                            gridcolor="#1a2540",
+                            tickfont=dict(color="#dce8ff", size=12),
+                        ),
                     ),
                     showlegend=True,
-                    legend=dict(x=0.5, xanchor="center", y=-0.12,
-                                orientation="h", font=dict(color="#dce8ff", size=12)),
-                    margin=dict(l=40,r=40,t=40,b=40),
+                    legend=dict(
+                        x=0.5, xanchor="center", y=-0.12,
+                        orientation="h", font=dict(color="#dce8ff", size=12),
+                    ),
+                    margin=dict(l=40, r=40, t=40, b=40),
                     height=320,
                     font=dict(family="DM Sans", color="#dce8ff"),
-                    title=dict(text="Metric Radar Chart", font=dict(size=14, color="#dce8ff"))
+                    title=dict(text="Metric Radar Chart", font=dict(size=14, color="#dce8ff")),
                 )
                 st.plotly_chart(fig_radar, use_container_width=True, config={"displayModeBar": False})
         else:
@@ -927,13 +1115,13 @@ elif page == "Model Stats":
     with tab6:
         st.markdown(section_header("Hyperparameters & Configuration"), unsafe_allow_html=True)
         params = [
-            ("Algorithm",          "Logistic Regression"),
+            ("Algorithm",          "Logistic Regression (SAG)"),
             ("Regularization (C)", "5.0"),
-            ("Max Iterations",     "1000"),
-            ("Solver",             "lbfgs"),
+            ("Max Iterations",     "300"),
+            ("Solver",             "sag"),
             ("Vectorizer",         "TF-IDF"),
             ("N-Gram Range",       "(1, 2)"),
-            ("Max Features",       "60,000"),
+            ("Max Features",       "15,000"),
             ("Min Doc Frequency",  "3"),
             ("Max Doc Frequency",  "70%"),
             ("TF-IDF Sublinear",   "Yes"),
@@ -961,31 +1149,31 @@ elif page == "Model Stats":
             f"font-size:11px;letter-spacing:2px;text-transform:uppercase;"
             f"border-bottom:1px solid #1a2540;'>Value</th>"
             f"</tr></thead><tbody>{rows}</tbody></table></div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
 
-# ╔══════════════════════════════════════════════╗
+# ╔════════════════════════════════════════════╗
 # ║              PAGE: ABOUT                     ║
-# ╚══════════════════════════════════════════════╝
+# ╚════════════════════════════════════════════╝
 elif page == "About":
     st.markdown(
         "<div style='font-family:Syne,sans-serif;font-size:28px;font-weight:700;"
         "margin-bottom:6px;color:#dce8ff;'>About TruthLens</div>"
         "<div style='color:#5a6e9a;font-size:14px;margin-bottom:28px;'>"
         "Pipeline overview and methodology</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
     steps = [
-        ("01","#00e5ff","Text Input",
+        ("01", "#00e5ff", "Text Input",
          "User submits a news article, headline, or paragraph for analysis."),
-        ("02","#a855f7","Preprocessing",
+        ("02", "#a855f7", "Preprocessing",
          "Text is lowercased; URLs, HTML tags, numbers and punctuation are stripped, leaving clean alphabetic tokens."),
-        ("03","#00ff9d","TF-IDF Vectorization",
-         "Cleaned text is converted to a 60,000-feature sparse vector using unigrams + bigrams. sublinear_tf=True boosts rare informative terms."),
-        ("04","#ffb300","Logistic Regression",
-         "Model computes log-odds from TF-IDF features. C=5.0 with lbfgs solver balances regularization and convergence."),
-        ("05","#ff3d6e","Result & Confidence",
+        ("03", "#00ff9d", "TF-IDF Vectorization",
+         "Cleaned text is converted to a 15,000-feature sparse vector using unigrams & bigrams. sublinear_tf=True boosts rare informative terms."),
+        ("04", "#ffb300", "Logistic Regression (SAG)",
+         "Model computes log-odds from TF-IDF features. C=5.0 with sag solver balances accuracy and speed."),
+        ("05", "#ff3d6e", "Result & Confidence",
          "predict_proba returns Real/Fake probabilities. The higher class is returned with its full confidence score and visualizations."),
     ]
     for num, color, title, desc in steps:
@@ -999,9 +1187,26 @@ elif page == "About":
             f"color:{color};margin-bottom:5px;'>{title}</div>"
             f"<div style='color:#8a9fc0;font-size:14px;line-height:1.7;'>{desc}</div>"
             f"</div></div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
+
     st.markdown("<br/>", unsafe_allow_html=True)
+
+    # Dataset instructions
+    st.markdown(
+        "<div style='background:#090e1d;border:1px solid #1a2540;"
+        "border-radius:16px;padding:24px;margin-bottom:16px;'>"
+        "<div style='font-family:Syne,sans-serif;font-size:16px;font-weight:700;"
+        "color:#00e5ff;margin-bottom:12px;'>📦 Dataset Setup</div>"
+        "<div style='color:#8a9fc0;font-size:14px;line-height:2;'>"
+        "Ensure <b style='color:#dce8ff;'>WELFake_Dataset.csv.zip</b> is in app folder.<br/><br/>"
+        "Download WELFake from: "
+        "<a href='https://www.kaggle.com/datasets/saurabhshahane/fake-news-classification' "
+        "style='color:#a855f7;'>Kaggle — WELFake Dataset</a>"
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
     st.markdown(
         "<div style='background:rgba(0,229,255,0.05);border:1px solid rgba(0,229,255,0.2);"
         "border-radius:16px;padding:24px;'>"
@@ -1009,10 +1214,10 @@ elif page == "About":
         "color:#00e5ff;margin-bottom:10px;'>⚠️ Disclaimer</div>"
         "<div style='color:#8a9fc0;font-size:14px;line-height:1.8;'>"
         "TruthLens is an AI-assisted educational tool. "
-        "It should not be used as the sole source of truth for verifying news. "
+        "It should not be used as sole source of truth for verifying news. "
         "Always cross-reference with trusted sources and fact-checking organizations. "
         "The model may produce incorrect results on very short text or content "
         "outside its training distribution."
         "</div></div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
